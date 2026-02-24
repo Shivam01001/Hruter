@@ -152,9 +152,9 @@ class SmartBruteForcer:
             
             # Prepare data
             post_data = None
-            if self.payload_raw:
+            if self.payload_raw is not None:
                 # Replace placeholders in raw string
-                post_data = self.payload_raw.replace('^USER^', username).replace('^PASS^', password)
+                post_data = str(self.payload_raw).replace('^USER^', username).replace('^PASS^', password)
             else:
                 # Standard key-value mapping
                 post_data = self.config.get('payload_template', {}).copy()
