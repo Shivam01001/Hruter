@@ -207,7 +207,8 @@ class SmartBruteForcer:
 
                 if self.verbose:
                     status = "[CORRECT]" if is_success else "[INCORRECT]"
-                    print(f"{self.base_url} - {username} - {password} - {status}")
+                    length = len(response.text)
+                    print(f"{self.base_url} - {username} - {password} - {status} [Code: {response.status_code}, Size: {length}]")
 
                 if is_success:
                     return True, {'username': username, 'password': password}
