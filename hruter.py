@@ -13,7 +13,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 import logging
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, Any
 import threading
 import sys
 import re
@@ -206,8 +206,9 @@ class SmartBruteForcer:
                             is_success = True
 
                 if self.verbose:
-                    status = "[CORRECT]" if is_success else "[INCORRECT]"
+                    status = "[*]" # Simpler indicator, focus on details
                     length = len(response.text)
+                    # url - user - pass - status [code, size]
                     print(f"{self.base_url} - {username} - {password} - {status} [Code: {response.status_code}, Size: {length}]")
 
                 if is_success:
@@ -354,13 +355,16 @@ def main():
     
     args = parser.parse_args()
     
-    # Load base config
-    config = {}
+    # Load configuration
+    config: Dict[str, Any] = {}
     if os.path.exists(args.config):
         try:
             with open(args.config, 'r') as f:
-                config = json.load(f)
-        except: pass
+                loaded_config = json.load(f)
+                if isinstance(loaded_config, dict):
+                    config = loaded_config
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
 
     if args.cli or (not (args.username or args.userlist) and not args.wordlist):
         data = get_cli_input()
@@ -374,15 +378,17 @@ def main():
         if args.url: config['target_url'] = args.url
         usernames = [args.username] if args.username else load_list(args.userlist, "usernames")
         passwords = load_list(args.wordlist, "passwords")
-        rotate_interval = args.rotate_interval
-        threads = args.threads
-        config['verbose'] = bool(args.verbose)
-        config['username_field'] = str(args.user_field)
-        config['password_field'] = str(args.pass_field)
-        config['success_string'] = args.success_string
-        config['failure_string'] = args.failure_string
-        config['max_retries'] = int(args.retries)
-        config['payload_raw'] = args.payload
+        rotate_interval = int(args.rotate_interval)
+        threads = int(args.threads)
+        config.update({
+            'verbose': bool(args.verbose),
+            'username_field': str(args.user_field),
+            'password_field': str(args.pass_field),
+            'success_string': args.success_string,
+            'failure_string': args.failure_string,
+            'max_retries': int(args.retries),
+            'payload_raw': args.payload
+        })
 
     if not usernames or not passwords or not config.get('target_url'):
         logger.error("Missing required parameters (URL, Users, Passwords).")
