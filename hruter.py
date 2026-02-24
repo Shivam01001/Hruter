@@ -402,7 +402,7 @@ def main():
     print(f"Target: {config['target_url']}")
     print(f"Users : {len(usernames)}")
     print(f"Passes: {len(passwords)}")
-    print(f"IP Rot: {rotate_interval}s" if rotate_interval > 0 else "IP Rot: Disabled")
+    print(f"IP Rot: {rotate_interval}s" if int(rotate_interval or 0) > 0 else "IP Rot: Disabled")
     print("=" * 60)
     
     if input("\n[!] Start attack? (y/N): ").lower() != 'y':
