@@ -1,0 +1,10 @@
+# Hruter Git Ignore
+bruteforce.log
+bruteforce_config.json
+successful_credentials.json
+__pycache__/
+*.pyc
+New Text Document.txt
+.gemini/
+.agent/
+brain/

