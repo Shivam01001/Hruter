@@ -13,9 +13,11 @@ A powerful Python tool designed for Kali Linux to perform brute force attacks wh
 
 ## Installation
 
-After extracting the tool from GitHub, navigate to the directory and run the setup script:
+First, clone the repository and navigate to the directory:
 
 ```bash
+git clone https://github.com/Shivam01001/Hruter.git
+cd Hruter
 chmod +x setup.sh
 ./setup.sh
 ```
